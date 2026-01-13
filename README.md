@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Мой первый проект на GitHub
 
 Это мой первый репозиторий на GitHub!
@@ -12,3 +13,7 @@
 
 ## Контакты
 - Мой GitHub: [ваш-логин](https://github.com/Yuriy-su)
+=======
+# BNB-database
+My first github project
+>>>>>>> d933fe1d1f418ea9614daed04d27c8497ae9e50d
