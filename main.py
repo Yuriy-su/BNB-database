@@ -146,7 +146,7 @@ def main():
                 print("⚠️ Failed to get block data")
             
             # Пауза 15 секунд между проверками (BSC ~3 сек/блок)
-            time.sleep(15)  # Update
+            time.sleep(60)  # Update
             
         except KeyboardInterrupt:
             print("\n🛑 Service stopped by user")
