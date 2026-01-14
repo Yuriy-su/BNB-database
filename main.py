@@ -122,4 +122,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"💥 Critical error: {e}")
         print("Restarting in 60 seconds...")
-        time.sleep(60)"# Update" 
+        time.sleep(60) # Update
