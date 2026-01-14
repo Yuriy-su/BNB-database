@@ -1,125 +1,159 @@
 import os
 import time
 import requests
-import psycopg2
 from datetime import datetime
+import psycopg2
+from psycopg2 import pool
+from dotenv import load_dotenv
 
-def get_bsc_data(api_key):
-    """Получаем данные с BSCScan API"""
-    if not api_key:
-        print("⚠️ BSCSCAN_API_KEY not set in environment variables")
-        return None
-    
+# Загружаем переменные окружения
+load_dotenv()
+
+# Конфигурация
+BSC_RPC_URL = os.getenv('BSC_RPC_URL', 'https://bsc-dataseed.binance.org/')
+BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY', '')
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+# Инициализация пула соединений БД
+db_pool = None
+
+def init_database():
+    """Инициализация соединения с БД"""
+    global db_pool
     try:
-        # Пример 1: Получить цену BNB
-        params = {
-            'module': 'stats',
-            'action': 'bscprice',
-            'apikey': api_key
+        db_pool = psycopg2.pool.SimpleConnectionPool(
+            1, 20, DATABASE_URL
+        )
+        print("✅ Database connection pool created")
+        
+        # Создаем таблицу если не существует
+        conn = db_pool.getconn()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS bsc_blocks (
+                id SERIAL PRIMARY KEY,
+                block_number BIGINT UNIQUE,
+                timestamp TIMESTAMP,
+                transaction_count INT,
+                gas_used DECIMAL,
+                gas_limit DECIMAL,
+                miner VARCHAR(42),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        conn.commit()
+        cursor.close()
+        db_pool.putconn(conn)
+        print("✅ Database table ready")
+        
+    except Exception as e:
+        print(f"❌ Database initialization error: {e}")
+
+def get_bsc_block(block_number='latest'):
+    """Получение данных блока из BSC"""
+    try:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_getBlockByNumber",
+            "params": [block_number, True],
+            "id": 1
         }
-        
-        response = requests.get('https://api.bscscan.com/api', params=params, timeout=10)
-        response.raise_for_status()  # Проверка HTTP ошибок
-        
+        response = requests.post(BSC_RPC_URL, json=payload, timeout=10)
         data = response.json()
         
-        if data['status'] == '1':
-            bnb_price = data['result']['ethusd']
-            print(f"✅ BNB Price: ${bnb_price}")
-            return {"bnb_price": bnb_price}
+        if 'result' in data:
+            return data['result']
         else:
-            print(f"❌ BSCScan API error: {data.get('message')}")
+            print(f"⚠️ Error getting block: {data}")
             return None
-            
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Network error: {e}")
-        return None
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        print(f"❌ BSC RPC error: {e}")
         return None
 
-def save_to_database(db_url, data):
-    """Сохраняем данные в PostgreSQL"""
-    if not db_url:
-        print("⚠️ DATABASE_URL not set")
+def save_block_to_db(block_data):
+    """Сохранение данных блока в БД"""
+    if not block_data:
         return False
     
     try:
-        conn = psycopg2.connect(db_url)
-        cur = conn.cursor()
+        conn = db_pool.getconn()
+        cursor = conn.cursor()
         
-        # Создаём таблицу если не существует
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS bsc_prices (
-                id SERIAL PRIMARY KEY,
-                bnb_price_usd DECIMAL(10, 4),
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
+        # Конвертируем hex в числа
+        block_number = int(block_data['number'], 16)
+        timestamp = int(block_data['timestamp'], 16)
+        tx_count = len(block_data['transactions'])
+        gas_used = int(block_data['gasUsed'], 16)
+        gas_limit = int(block_data['gasLimit'], 16)
+        miner = block_data['miner']
         
-        # Добавляем данные
-        if data and 'bnb_price' in data:
-            cur.execute("""
-                INSERT INTO bsc_prices (bnb_price_usd)
-                VALUES (%s)
-            """, (float(data['bnb_price']),))
+        cursor.execute('''
+            INSERT INTO bsc_blocks 
+            (block_number, timestamp, transaction_count, gas_used, gas_limit, miner)
+            VALUES (%s, to_timestamp(%s), %s, %s, %s, %s)
+            ON CONFLICT (block_number) DO NOTHING
+        ''', (block_number, timestamp, tx_count, gas_used, gas_limit, miner))
         
         conn.commit()
+        cursor.close()
+        db_pool.putconn(conn)
         
-        # Сколько записей в таблице
-        cur.execute("SELECT COUNT(*) FROM bsc_prices;")
-        count = cur.fetchone()[0]
-        print(f"🗄️ Total price records: {count}")
-        
-        cur.close()
-        conn.close()
+        print(f"✅ Block #{block_number} saved to DB")
         return True
         
     except Exception as e:
-        print(f"❌ Database error: {e}")
+        print(f"❌ Error saving block to DB: {e}")
         return False
 
 def main():
-    print("=" * 50)
-    print("🚀 BSC Data Collector Service")
-    print("=" * 50)
+    """Основной цикл работы"""
+    print("🚀 Starting BSC Database Service...")
     
-    # Получаем ключи ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
-    api_key = os.getenv('BSCSCAN_API_KEY')
-    db_url = os.getenv('DATABASE_URL')
+    # Проверяем обязательные переменные
+    if not DATABASE_URL:
+        print("❌ DATABASE_URL not set!")
+        return
     
-    print(f"🔑 API Key loaded: {'✅' if api_key else '❌ Not set'}")
-    print(f"🗄️ DB URL loaded: {'✅' if db_url else '❌ Not set'}")
+    # Инициализируем БД
+    init_database()
     
-    if not api_key:
-        print("\n⚠️ Please set BSCSCAN_API_KEY in Railway Variables!")
-        print("1. Go to Railway → Variables")
-        print("2. Add: BSCSCAN_API_KEY = your_key_here")
-        print("3. Redeploy service\n")
+    if not db_pool:
+        print("❌ Cannot start without database connection")
+        return
     
-    cycle_count = 0
+    print("🔄 Starting block monitoring...")
+    last_processed_block = None
     
     while True:
-        cycle_count += 1
-        print(f"\n📊 Cycle #{cycle_count} at {datetime.now()}")
-        
-        # 1. Получаем данные с BSCScan
-        data = get_bsc_data(api_key)
-        
-        # 2. Сохраняем в базу
-        if data:
-            save_to_database(db_url, data)
-        
-        # 3. Ждём 5 минут до следующего цикла
-        print(f"⏳ Next update in 300 seconds (5 minutes)...")
-        time.sleep(300)
+        try:
+            # Получаем последний блок
+            block = get_bsc_block('latest')
+            
+            if block:
+                block_number = int(block['number'], 16)
+                
+                # Обрабатываем только новые блоки
+                if last_processed_block != block_number:
+                    print(f"📦 New block #{block_number} with {len(block['transactions'])} tx")
+                    
+                    # Сохраняем в БД
+                    save_block_to_db(block)
+                    
+                    last_processed_block = block_number
+                else:
+                    print(f"⏳ Waiting for new block... (current: #{block_number})")
+            else:
+                print("⚠️ Failed to get block data")
+            
+            # Пауза 15 секунд между проверками (BSC ~3 сек/блок)
+            time.sleep(15)  # Update
+            
+        except KeyboardInterrupt:
+            print("\n🛑 Service stopped by user")
+            break
+        except Exception as e:
+            print(f"❌ Main loop error: {e}")
+            time.sleep(30)  # Пауза при ошибке
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n🛑 Service stopped by user")
-    except Exception as e:
-        print(f"💥 Critical error: {e}")
-        print("Restarting in 60 seconds...")
-        time.sleep(60) # Update
+    main()
