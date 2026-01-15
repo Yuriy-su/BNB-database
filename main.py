@@ -41,6 +41,7 @@ def init_database():
                 current_price DECIMAL,
                 market_cap DECIMAL,
                 total_volume DECIMAL,
+                coin_id VARCHAR(100),
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
             )
@@ -59,17 +60,18 @@ def init_database():
 def get_liquid_tokens_from_coingecko(limit=1000):
     """
     Получает список ликвидных токенов BSC через CoinGecko API.
-    Сортирует по объёму торгов (total_volume).
+    Использует два запроса: сначала список, потом детали с адресами.
     """
     if not COINGECKO_API_KEY:
         print("❌ COINGECKO_API_KEY not set!")
         return []
     
-    all_tokens = []
-    page = 1
-    per_page = 250  # Максимум 250 токенов за запрос
-    
     print(f"🔄 Starting data collection from CoinGecko...")
+    
+    # ШАГ 1: Получаем список токенов с основными метриками
+    page = 1
+    per_page = 250
+    all_tokens = []
     
     while len(all_tokens) < limit:
         try:
@@ -77,7 +79,7 @@ def get_liquid_tokens_from_coingecko(limit=1000):
             params = {
                 'vs_currency': 'usd',
                 'category': 'binance-smart-chain',
-                'order': 'volume_desc',  # Сортировка по объёму (ликвидности)
+                'order': 'volume_desc',
                 'per_page': per_page,
                 'page': page,
                 'sparkline': 'false',
@@ -103,31 +105,84 @@ def get_liquid_tokens_from_coingecko(limit=1000):
                 break
             
             # Фильтруем только токены с объёмом торгов > 1000 USD
-            liquid_tokens = [
-                token for token in tokens 
-                if token.get('total_volume', 0) > 1000
-            ]
+            for token in tokens:
+                if token.get('total_volume', 0) > 1000:
+                    all_tokens.append(token)
             
-            all_tokens.extend(liquid_tokens)
-            print(f"✅ Received {len(liquid_tokens)} liquid tokens (page {page})")
+            print(f"✅ Received {len(tokens)} tokens (page {page})")
             
-            # CoinGecko API has limits, add pause
-            time.sleep(7)  # Free plan: 30 requests/min ≈ 1 request/2 sec
+            time.sleep(7)  # Пауза для лимитов API
             page += 1
             
             if len(all_tokens) >= limit:
                 all_tokens = all_tokens[:limit]
                 break
                 
-        except requests.exceptions.Timeout:
-            print("⏱️ Request timeout. Retrying in 10 seconds...")
-            time.sleep(10)
         except Exception as e:
-            print(f"❌ Error requesting CoinGecko: {e}")
+            print(f"❌ Error: {e}")
             break
     
-    print(f"🎯 Total collected: {len(all_tokens)} liquid BSC tokens")
-    return all_tokens
+    print(f"🎯 Got {len(all_tokens)} tokens. Now getting contract addresses...")
+    
+    # ШАГ 2: Для каждого токена получаем детали с адресом контракта
+    tokens_with_addresses = []
+    
+    for i, token in enumerate(all_tokens):
+        try:
+            token_id = token.get('id')
+            if not token_id:
+                continue
+            
+            # Получаем детали токена
+            details_url = f"https://api.coingecko.com/api/v3/coins/{token_id}"
+            details_params = {
+                'localization': 'false',
+                'tickers': 'false',
+                'market_data': 'false',
+                'community_data': 'false',
+                'developer_data': 'false',
+                'sparkline': 'false',
+                'x_cg_demo_api_key': COINGECKO_API_KEY
+            }
+            
+            # Выводим прогресс каждые 50 токенов
+            if i % 50 == 0:
+                print(f"🔍 Getting contract addresses: {i}/{len(all_tokens)}...")
+            
+            response = requests.get(details_url, params=details_params, timeout=30)
+            
+            if response.status_code == 200:
+                details = response.json()
+                
+                # Ищем адрес контракта для BSC
+                platforms = details.get('platforms', {})
+                contract_address = platforms.get('binance-smart-chain', '') or platforms.get('bsc', '')
+                
+                if contract_address:
+                    # Добавляем адрес в данные токена
+                    token['contract_address'] = contract_address.lower()
+                    token['coin_id'] = token_id  # Сохраняем ID CoinGecko
+                    tokens_with_addresses.append(token)
+                else:
+                    # Проверяем другие возможные ключи
+                    for key in platforms:
+                        if 'binance' in key.lower() or 'bsc' in key.lower():
+                            token['contract_address'] = platforms[key].lower()
+                            token['coin_id'] = token_id
+                            tokens_with_addresses.append(token)
+                            break
+                    else:
+                        print(f"  ⚠️ No BSC address found for {token.get('symbol')}")
+            
+            # Пауза между запросами (чтобы не превысить лимиты)
+            time.sleep(0.7)  # 0.7 секунд между запросами
+            
+        except Exception as e:
+            print(f"  ⚠️ Error getting details for {token.get('symbol')}: {e}")
+            continue
+    
+    print(f"✅ Got contract addresses for {len(tokens_with_addresses)} tokens")
+    return tokens_with_addresses
 
 def save_tokens_to_db(tokens_data):
     """
@@ -144,29 +199,25 @@ def save_tokens_to_db(tokens_data):
         
         for token in tokens_data:
             try:
-                # Извлекаем данные из ответа CoinGecko
+                # Адрес контракта
                 token_address = token.get('contract_address', '')
                 
-                # Если адреса нет, пропускаем (не контрактный токен BSC)
                 if not token_address:
                     continue
                 
                 name = token.get('name', '')
                 symbol = token.get('symbol', '')
-                
-                # Ликвидность (объём торгов за 24ч)
                 liquidity_usd = token.get('total_volume', 0)
-                
-                # Дополнительные метрики
                 current_price = token.get('current_price', 0)
                 market_cap = token.get('market_cap', 0)
+                coin_id = token.get('coin_id', '')
                 
                 # Вставка или обновление записи
                 cursor.execute('''
                     INSERT INTO tokens 
                     (network, name, symbol, liquidity_usd, token_address, 
-                     current_price, market_cap, total_volume)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     current_price, market_cap, total_volume, coin_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (token_address) 
                     DO UPDATE SET
                         name = EXCLUDED.name,
@@ -175,15 +226,15 @@ def save_tokens_to_db(tokens_data):
                         current_price = EXCLUDED.current_price,
                         market_cap = EXCLUDED.market_cap,
                         total_volume = EXCLUDED.total_volume,
+                        coin_id = EXCLUDED.coin_id,
                         updated_at = NOW()
                 ''', (
                     NETWORK, name, symbol, liquidity_usd, token_address,
-                    current_price, market_cap, liquidity_usd
+                    current_price, market_cap, liquidity_usd, coin_id
                 ))
                 
                 saved_count += 1
                 
-                # Выводим прогресс каждые 50 токенов
                 if saved_count % 50 == 0:
                     print(f"  💾 Saved {saved_count} tokens...")
                     
@@ -217,14 +268,17 @@ def display_token_stats(tokens):
         symbol = token.get('symbol', 'N/A').upper()
         volume = token.get('total_volume', 0)
         price = token.get('current_price', 0)
-        print(f"  {i}. {symbol:8} - Volume: ${volume:,.0f} | Price: ${price:.6f}")
+        address = token.get('contract_address', 'N/A')[:20] + "..."
+        print(f"  {i}. {symbol:8} - Volume: ${volume:,.0f} | Address: {address}")
     
-    # Общая статистика
+    # Статистика
     total_volume = sum(t.get('total_volume', 0) for t in tokens)
     avg_volume = total_volume / len(tokens) if tokens else 0
+    tokens_with_address = len([t for t in tokens if t.get('contract_address')])
     
     print(f"\n📈 General statistics:")
     print(f"   • Total tokens: {len(tokens)}")
+    print(f"   • Tokens with BSC address: {tokens_with_address}")
     print(f"   • Total trading volume: ${total_volume:,.0f}")
     print(f"   • Average volume per token: ${avg_volume:,.0f}")
     print("-" * 50)
@@ -279,17 +333,48 @@ def main():
             cursor.close()
             db_pool.putconn(conn)
             print(f"   • Total in database: {count} tokens")
-        except:
-            pass
+            
+            # Показываем топ-5 из базы
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT symbol, name, liquidity_usd, token_address 
+                FROM tokens 
+                ORDER BY liquidity_usd DESC 
+                LIMIT 5
+            ''')
+            top_tokens = cursor.fetchall()
+            cursor.close()
+            
+            print("\n🏆 Top 5 from database:")
+            for i, (symbol, name, liquidity, address) in enumerate(top_tokens, 1):
+                print(f"  {i}. {symbol} ({name[:20]}...): ${liquidity:,.0f}")
+                
+        except Exception as e:
+            print(f"  ⚠️ Error checking database: {e}")
     
     print("\n🎯 Done! Check data in Postgres:")
     print("   SELECT * FROM tokens ORDER BY liquidity_usd DESC LIMIT 10;")
+    print("\n⏳ Container will stay alive for 10 minutes...")
 
 # ========== ЗАПУСК СКРИПТА ==========
 
-print("🔄 Script starting...")
-main()
-print("✅ Script finished. Check logs for details.")
-# Оставляем контейнер живым на 5 минут для проверки
-print("⏳ Container will stay alive for 5 minutes...")
-time.sleep(300)
+print("=" * 60)
+print("🔄 SCRIPT STARTING")
+print("=" * 60)
+
+try:
+    main()
+except KeyboardInterrupt:
+    print("\n🛑 Script interrupted by user")
+except Exception as e:
+    print(f"\n❌ Unexpected error: {e}")
+    import traceback
+    traceback.print_exc()
+
+print("\n" + "=" * 60)
+print("✅ SCRIPT FINISHED")
+print("=" * 60)
+
+# Держим контейнер живым для проверки логов
+print("\n⏳ Container alive for 10 minutes...")
+time.sleep(600)
