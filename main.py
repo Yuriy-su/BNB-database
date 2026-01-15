@@ -16,50 +16,6 @@ NETWORK = "BSC"  # Сеть Binance Smart Chain
 # Инициализация пула соединений БД
 db_pool = None
 
-# ========== НОВАЯ ФУНКЦИЯ: СОЗДАНИЕ ТАБЛИЦЫ ==========
-
-def create_tokens_table():
-    """Создаёт таблицу tokens с 6 столбцами если её нет"""
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tokens (
-                id SERIAL PRIMARY KEY,
-                network VARCHAR(20) NOT NULL,
-                name VARCHAR(200),
-                symbol VARCHAR(50),
-                liquidity_usd DECIMAL(30, 2),
-                token_address VARCHAR(100) UNIQUE NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        print("✅ Table 'tokens' created successfully")
-        
-        # Проверяем что таблица создана
-        cursor.execute("""
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_name = 'tokens' 
-            ORDER BY ordinal_position
-        """)
-        
-        columns = cursor.fetchall()
-        print(f"📊 Table has {len(columns)} columns:")
-        for col_name, col_type in columns:
-            print(f"  - {col_name}: {col_type}")
-        
-        cursor.close()
-        conn.close()
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error creating table: {e}")
-        return False
-
 # ========== ОСНОВНЫЕ ФУНКЦИИ ==========
 
 def init_database():
@@ -83,44 +39,25 @@ def init_database():
         columns = {row[0]: row[1] for row in cursor.fetchall()}
         print(f"📊 Table 'tokens' has {len(columns)} columns")
         
-        # Проверяем обязательные столбцы (только 6)
-        required_columns = ['network', 'name', 'symbol', 'liquidity_usd', 'token_address']
+        # Проверяем обязательные столбцы
+        required_columns = ['network', 'name', 'symbol', 'liquidity_usd', 
+                          'token_address', 'current_price', 'market_cap', 'total_volume']
         
         missing_columns = [col for col in required_columns if col not in columns]
         
         if missing_columns:
-            print(f"⚠️ Missing columns: {missing_columns}")
-            print("Trying to add missing columns...")
-            
-            for column in missing_columns:
-                try:
-                    if column == 'network':
-                        cursor.execute('ALTER TABLE tokens ADD COLUMN network VARCHAR(20);')
-                    elif column == 'name':
-                        cursor.execute('ALTER TABLE tokens ADD COLUMN name VARCHAR(200);')
-                    elif column == 'symbol':
-                        cursor.execute('ALTER TABLE tokens ADD COLUMN symbol VARCHAR(50);')
-                    elif column == 'liquidity_usd':
-                        cursor.execute('ALTER TABLE tokens ADD COLUMN liquidity_usd DECIMAL(30, 2);')
-                    elif column == 'token_address':
-                        cursor.execute('ALTER TABLE tokens ADD COLUMN token_address VARCHAR(100);')
-                    
-                    conn.commit()
-                    print(f"✅ Added column: {column}")
-                except Exception as e:
-                    print(f"⚠️ Could not add column {column}: {e}")
+            print(f"❌ Missing columns: {missing_columns}")
+            return False
         
-        # Добавляем UNIQUE constraint если нет
-        try:
-            cursor.execute('''
-                ALTER TABLE tokens 
-                ADD CONSTRAINT unique_token_address 
-                UNIQUE (token_address);
-            ''')
-            conn.commit()
-            print("✅ Added UNIQUE constraint on token_address")
-        except:
-            print("ℹ️ UNIQUE constraint already exists or can't be added")
+        # Проверяем наличие coin_id, добавляем если нет
+        if 'coin_id' not in columns:
+            print("⚠️ Column 'coin_id' not found, adding it...")
+            try:
+                cursor.execute('ALTER TABLE tokens ADD COLUMN coin_id VARCHAR(100);')
+                conn.commit()
+                print("✅ Column 'coin_id' added")
+            except Exception as e:
+                print(f"⚠️ Could not add coin_id: {e}")
         
         cursor.close()
         db_pool.putconn(conn)
@@ -219,8 +156,9 @@ def get_tokens_with_contract_addresses(limit=30):
                     # Очищаем адрес
                     contract_address = contract_address.lower().strip()
                     
-                    # Добавляем адрес в данные токена
+                    # Добавляем адрес и coin_id в данные токена
                     token['contract_address'] = contract_address
+                    token['coin_id'] = token_id
                     
                     tokens_with_addresses.append(token)
                     print(f"    ✓ {symbol}: found BSC address")
@@ -229,6 +167,7 @@ def get_tokens_with_contract_addresses(limit=30):
                     for key, address in platforms.items():
                         if address and isinstance(address, str) and address.startswith('0x'):
                             token['contract_address'] = address.lower().strip()
+                            token['coin_id'] = token_id
                             tokens_with_addresses.append(token)
                             print(f"    ⚠️ {symbol}: using {key} address")
                             break
@@ -264,6 +203,7 @@ def save_tokens_to_database(tokens_data):
         try:
             # Извлекаем данные
             token_address = token.get('contract_address', '').strip()
+            coin_id = token.get('coin_id', '')
             symbol = token.get('symbol', 'UNKNOWN').upper()
             name = token.get('name', '')
             
@@ -275,29 +215,42 @@ def save_tokens_to_database(tokens_data):
             
             # Подготавливаем значения для базы данных
             liquidity_usd = float(token.get('total_volume', 0) or 0)
+            current_price = float(token.get('current_price', 0) or 0)
+            market_cap = float(token.get('market_cap', 0) or 0)
+            total_volume = liquidity_usd  # Используем тот же показатель
             
             # Получаем соединение с БД
             conn = db_pool.getconn()
             cursor = conn.cursor()
             
             try:
-                # SQL запрос для вставки (только 6 столбцов)
+                # SQL запрос для вставки или обновления
+                # Используем все столбцы, которые есть в вашей таблице
                 cursor.execute('''
                     INSERT INTO tokens 
-                    (network, name, symbol, liquidity_usd, token_address)
-                    VALUES (%s, %s, %s, %s, %s)
+                    (network, name, symbol, liquidity_usd, token_address, 
+                     current_price, market_cap, total_volume, coin_id, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (token_address) 
                     DO UPDATE SET
                         name = EXCLUDED.name,
                         symbol = EXCLUDED.symbol,
                         liquidity_usd = EXCLUDED.liquidity_usd,
-                        updated_at = CURRENT_TIMESTAMP
+                        current_price = EXCLUDED.current_price,
+                        market_cap = EXCLUDED.market_cap,
+                        total_volume = EXCLUDED.total_volume,
+                        coin_id = EXCLUDED.coin_id,
+                        updated_at = NOW()
                 ''', (
                     NETWORK,
                     name[:200],  # Ограничиваем длину
                     symbol[:50],
                     liquidity_usd,
-                    token_address
+                    token_address,
+                    current_price,
+                    market_cap,
+                    total_volume,
+                    coin_id[:100]
                 ))
                 
                 conn.commit()
@@ -372,6 +325,71 @@ def display_results(tokens_saved, total_tokens):
     
     print("\n" + "=" * 60)
 
+# ========== НОВАЯ ФУНКЦИЯ: ЭКСПОРТ В CSV ==========
+
+def export_tokens_to_csv():
+    """Экспортирует все токены в CSV формат (выводит в консоль)"""
+    print("\n" + "=" * 80)
+    print("📤 CSV ЭКСПОРТ ДАННЫХ ИЗ БАЗЫ")
+    print("=" * 80)
+    
+    try:
+        conn = db_pool.getconn()
+        cursor = conn.cursor()
+        
+        # Получаем ВСЕ токены отсортированные по ликвидности
+        cursor.execute("""
+            SELECT id, network, name, symbol, 
+                   liquidity_usd::numeric(30,2), 
+                   token_address 
+            FROM tokens 
+            ORDER BY liquidity_usd DESC
+        """)
+        
+        tokens = cursor.fetchall()
+        
+        print(f"📊 Всего токенов в базе: {len(tokens)}")
+        print("\n" + "=" * 80)
+        print("СКОПИРУЙТЕ ВСЁ НИЖЕ И СОХРАНИТЕ КАК tokens.csv")
+        print("А ЗАТЕМ ОТКРОЙТЕ В EXCEL ИЛИ GOOGLE SHEETS")
+        print("=" * 80)
+        
+        # Заголовки CSV
+        print("id,network,name,symbol,liquidity_usd,token_address")
+        
+        # Данные в CSV формате
+        for token in tokens:
+            id_val, network, name, symbol, liquidity, address = token
+            
+            # Экранируем запятые в названиях
+            if ',' in str(name):
+                name = f'"{name}"'
+            if ',' in str(symbol):
+                symbol = f'"{symbol}"'
+            if ',' in str(address):
+                address = f'"{address}"'
+            
+            print(f"{id_val},{network},{name},{symbol},{liquidity},{address}")
+        
+        print("=" * 80)
+        print("✅ ЭКСПОРТ ЗАВЕРШЁН")
+        print(f"📁 Экспортировано {len(tokens)} токенов")
+        print("\n📋 ИНСТРУКЦИЯ:")
+        print("1. Скопируйте ВЕСЬ текст выше (от = до =)")
+        print("2. Вставьте в БЛОКНОТ (Notepad)")
+        print("3. Сохраните как tokens.csv")
+        print("4. Откройте в Microsoft Excel или Google Sheets")
+        print("=" * 80)
+        
+        cursor.close()
+        db_pool.putconn(conn)
+        
+        return len(tokens)
+        
+    except Exception as e:
+        print(f"❌ Ошибка экспорта: {e}")
+        return 0
+
 # ========== ОСНОВНАЯ ФУНКЦИЯ ==========
 
 def main():
@@ -390,12 +408,6 @@ def main():
     
     if not DATABASE_URL:
         print("❌ ERROR: DATABASE_URL not found!")
-        return
-    
-    # ===== СОЗДАНИЕ ТАБЛИЦЫ ЕСЛИ НЕТ =====
-    print("\n🔧 Checking/Creating table 'tokens'...")
-    if not create_tokens_table():
-        print("❌ Failed to create table")
         return
     
     # Инициализация базы данных
@@ -419,6 +431,20 @@ def main():
     # Вывод результатов
     display_results(saved_count, len(tokens))
     
+    # ===== НОВОЕ: ЭКСПОРТ ДАННЫХ =====
+    print("\n" + "=" * 60)
+    print("📤 ЗАПУСК ЭКСПОРТА ДАННЫХ")
+    print("=" * 60)
+    
+    export_count = export_tokens_to_csv()
+    
+    if export_count > 0:
+        print(f"\n🎉 ВСЁ ГОТОВО! База данных обновлена и экспортирована.")
+        print(f"   • Собрано токенов: {saved_count}")
+        print(f"   • Экспортировано: {export_count}")
+    else:
+        print("\n⚠️ Экспорт не удался, но данные собраны успешно")
+    
     print(f"\n⏱️ Total execution time: {time.strftime('%M:%S')}")
 
 # ========== ЗАПУСК ПРОГРАММЫ ==========
@@ -441,6 +467,9 @@ if __name__ == "__main__":
     print("📝 Check Railway logs for details")
     print("=" * 60)
     
-    # Держим контейнер активным для проверки логов
-    print("\n⏳ Container will exit in 30 seconds...")
-    time.sleep(30)
+    # Держим контейнер активным для проверки логов и копирования
+    print("\n⏳ Container will stay alive for 10 minutes to copy data...")
+    for i in range(600):
+        if i % 60 == 0:
+            print(f"[{i//60} min] Container is still running - copy CSV data from above")
+        time.sleep(1)
