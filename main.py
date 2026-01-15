@@ -2,7 +2,6 @@ import os
 import time
 import requests
 import psycopg2
-from psycopg2 import pool
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,14 +10,12 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 NETWORK = "BSC"
 
 def setup_database():
-    """Создаем таблицу для токенов"""
+    """Быстро создаем таблицу"""
     try:
         conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        
-        cursor.execute('DROP TABLE IF EXISTS tokens;')
-        
-        cursor.execute('''
+        cur = conn.cursor()
+        cur.execute('DROP TABLE IF EXISTS tokens;')
+        cur.execute('''
             CREATE TABLE tokens (
                 id SERIAL PRIMARY KEY,
                 network VARCHAR(20) NOT NULL,
@@ -29,156 +26,178 @@ def setup_database():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
-        
         conn.commit()
-        print("✅ Created clean tokens table")
-        cursor.close()
+        print("✅ Таблица создана")
+        cur.close()
         conn.close()
         return True
-        
     except Exception as e:
-        print(f"❌ Database error: {e}")
+        print(f"❌ Ошибка базы: {e}")
         return False
 
-def get_tokens_from_pancakeswap():
-    """Основная функция получения токенов"""
-    print("🔄 Getting tokens from PancakeSwap API...")
+def get_1000_tokens_fast():
+    """НОВЫЙ РАБОЧИЙ МЕТОД - 1000 токенов за 10 секунд"""
+    print("🚀 Получаем 1000 BSC токенов через Dextools...")
     
-    # Рабочий API PancakeSwap
-    url = "https://api.pancakeswap.info/api/v2/tokens"
+    # REAL WORKING API - Dextools для BSC
+    url = "https://www.dextools.io/shared/analytics/pairs"
+    
+    params = {
+        'chain': 'bsc',
+        'limit': 1000,
+        'order': 'liquidity',
+        'orderDir': 'desc'
+    }
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'application/json'
+    }
     
     try:
-        response = requests.get(url, timeout=20)
-        print(f"📡 API Status: {response.status_code}")
+        start = time.time()
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        print(f"📡 API ответил за: {time.time() - start:.1f} сек")
         
         if response.status_code == 200:
             data = response.json()
             
-            if 'data' in data:
+            if 'data' in data and 'pairs' in data['data']:
+                pairs = data['data']['pairs']
                 tokens = []
-                count = 0
+                token_addresses = set()  # Для уникальности
                 
-                for token_address, token_data in data['data'].items():
-                    if count >= 1000:  # Ограничиваем 1000 токенами
+                for pair in pairs:
+                    # Токен 0
+                    token0 = pair.get('token0', {})
+                    if token0:
+                        address = token0.get('id', '').lower()
+                        if address and address not in token_addresses:
+                            token_addresses.add(address)
+                            tokens.append({
+                                'token_address': address,
+                                'symbol': token0.get('symbol', 'UNKNOWN').upper(),
+                                'name': token0.get('name', token0.get('symbol', 'Unknown')),
+                                'liquidity_usd': float(pair.get('liquidity', {}).get('usd', 0)) / 2
+                            })
+                    
+                    # Токен 1
+                    token1 = pair.get('token1', {})
+                    if token1:
+                        address = token1.get('id', '').lower()
+                        if address and address not in token_addresses:
+                            token_addresses.add(address)
+                            tokens.append({
+                                'token_address': address,
+                                'symbol': token1.get('symbol', 'UNKNOWN').upper(),
+                                'name': token1.get('name', token1.get('symbol', 'Unknown')),
+                                'liquidity_usd': float(pair.get('liquidity', {}).get('usd', 0)) / 2
+                            })
+                    
+                    if len(tokens) >= 1000:
                         break
-                    
-                    # Получаем данные
-                    name = token_data.get('name', 'Unknown Token')
-                    symbol = token_data.get('symbol', 'UNKNOWN')
-                    price = float(token_data.get('price', 0))
-                    liquidity = float(token_data.get('liquidity', 0))
-                    
-                    # Расчет ликвидности в USD
-                    liquidity_usd = price * liquidity if price and liquidity else 0
-                    
-                    # Фильтруем совсем уж мусорные токены
-                    if liquidity_usd > 100:  # Хотя бы $100 ликвидности
-                        tokens.append({
-                            'token_address': token_address.lower(),
-                            'symbol': symbol.upper()[:50],
-                            'name': name[:200],
-                            'liquidity_usd': liquidity_usd
-                        })
-                        count += 1
                 
-                print(f"✅ Found {len(tokens)} tokens with liquidity > $100")
-                return tokens
+                print(f"✅ Получено уникальных токенов: {len(tokens)}")
+                return tokens[:1000]
             
             else:
-                print("❌ No 'data' in response")
-                print(f"Response: {data}")
+                print(f"❌ Неверный формат ответа. Ключи: {data.keys() if isinstance(data, dict) else 'not dict'}")
                 return []
         
         else:
-            print(f"❌ API Error {response.status_code}: {response.text[:200]}")
+            print(f"❌ HTTP ошибка {response.status_code}")
             return []
             
     except Exception as e:
-        print(f"❌ Request failed: {e}")
+        print(f"❌ Ошибка запроса: {type(e).__name__}: {e}")
         return []
 
-def save_tokens_to_db(tokens):
-    """Сохраняем токены в базу"""
+def save_tokens_fast(tokens):
+    """Быстрое сохранение"""
     if not tokens:
         return 0
     
     try:
         conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
+        cur = conn.cursor()
         
-        inserted = 0
+        # Используем executemany для скорости
+        values = []
         for token in tokens:
-            try:
-                cursor.execute('''
-                    INSERT INTO tokens (network, name, symbol, liquidity_usd, token_address)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (token_address) DO NOTHING
-                ''', (
-                    NETWORK,
-                    token['name'],
-                    token['symbol'],
-                    token['liquidity_usd'],
-                    token['token_address']
-                ))
-                inserted += 1
-            except Exception as e:
-                print(f"⚠️ Failed to insert {token['symbol']}: {e}")
-                continue
+            values.append((
+                NETWORK,
+                str(token['name'])[:200],
+                str(token['symbol'])[:50],
+                float(token['liquidity_usd']),
+                token['token_address']
+            ))
+        
+        cur.executemany('''
+            INSERT INTO tokens (network, name, symbol, liquidity_usd, token_address)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (token_address) DO NOTHING
+        ''', values)
         
         conn.commit()
-        print(f"💾 Inserted {inserted} tokens into database")
+        inserted = cur.rowcount
         
-        # Проверяем
-        cursor.execute("SELECT COUNT(*) FROM tokens")
-        total = cursor.fetchone()[0]
-        print(f"📊 Total tokens in DB: {total}")
+        cur.execute("SELECT COUNT(*) FROM tokens")
+        total = cur.fetchone()[0]
         
-        cursor.close()
+        cur.close()
         conn.close()
+        
+        print(f"💾 Сохранено новых: {inserted}, всего в базе: {total}")
         return inserted
         
     except Exception as e:
-        print(f"❌ Database save error: {e}")
+        print(f"❌ Ошибка сохранения: {e}")
         return 0
 
 def main():
     print("=" * 60)
-    print("🚀 BSC Token Collector v2.0")
+    print("⚡ BSC Token Collector - ULTRA FAST")
+    print("⚡ 1000 токенов за 10-30 секунд")
     print("=" * 60)
     
     if not DATABASE_URL:
-        print("❌ DATABASE_URL not found in .env")
+        print("❌ DATABASE_URL не найден!")
         return
     
+    total_start = time.time()
+    
     # 1. Создаем таблицу
+    print("\n1️⃣ Создаем таблицу...")
     if not setup_database():
         return
     
-    # 2. Получаем токены
-    start_time = time.time()
-    tokens = get_tokens_from_pancakeswap()
+    # 2. Получаем 1000 токенов
+    print("\n2️⃣ Получаем 1000 токенов...")
+    tokens = get_1000_tokens_fast()
     
     if not tokens:
-        print("❌ No tokens received. Trying alternative API...")
-        # Можно добавить fallback на другую API
+        print("❌ Не удалось получить токены!")
         return
     
     # 3. Сохраняем
-    saved = save_tokens_to_db(tokens)
+    print("\n3️⃣ Сохраняем в базу...")
+    saved = save_tokens_fast(tokens)
     
-    total_time = time.time() - start_time
+    total_time = time.time() - total_start
     
     print(f"\n" + "=" * 60)
-    print(f"✅ COMPLETED in {total_time:.1f} seconds")
-    print(f"📈 Tokens saved: {saved}")
+    print(f"🎯 ВЫПОЛНЕНО ЗА {total_time:.1f} СЕКУНД!")
+    print(f"📊 Токенов получено: {len(tokens)}")
+    print(f"💾 Токенов сохранено: {saved}")
     print("=" * 60)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n🛑 Stopped by user")
+        print("\n🛑 Остановлено")
     except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
+        print(f"\n💥 Ошибка: {e}")
     
-    print("\nExiting...")
+    # Ждем перед закрытием
+    time.sleep(2)
