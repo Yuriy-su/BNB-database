@@ -1,118 +1,291 @@
-# main.py - АБСОЛЮТНО ПРОСТОЙ СКРИПТ
+# main.py - ФИНАЛЬНЫЙ КОД ДЛЯ RAILWAY
 import os
+import time
+import requests
 import psycopg2
+from datetime import datetime
 
-print("=" * 60)
-print("🚀 НАЧАЛО РАБОТЫ СКРИПТА")
-print("=" * 60)
+# ========== КОНФИГУРАЦИЯ ==========
+# Railway автоматически загружает переменные из Variables
+DATABASE_URL = os.environ.get('DATABASE_URL')
+BIRDEYE_API_KEY = os.environ.get('BIRDEYE_API_KEY')  # ДОБАВЬТЕ ЭТУ ПЕРЕМЕННУЮ В RAILWAY
+NETWORK = "BSC"
+# ==================================
 
-# 1. Проверяем переменные окружения
-print("1️⃣ Проверяем переменные окружения...")
-DATABASE_URL = os.getenv('DATABASE_URL')
+def log(message):
+    """Логирование с временем"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}")
 
-if not DATABASE_URL:
-    print("❌ ОШИБКА: DATABASE_URL не найден!")
-    print("   Проверьте, что файл .env существует и содержит:")
-    print("   DATABASE_URL=postgresql://user:password@host:port/database")
-    exit(1)
-
-print(f"✅ DATABASE_URL найден: {DATABASE_URL[:50]}...")
-
-# 2. Подключаемся к базе
-print("\n2️⃣ Подключаемся к базе данных...")
-try:
-    conn = psycopg2.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    print("✅ Подключение успешно!")
-except Exception as e:
-    print(f"❌ Ошибка подключения: {e}")
-    exit(1)
-
-# 3. Создаем таблицу (если не существует)
-print("\n3️⃣ Создаем таблицу tokens...")
-try:
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS tokens (
-            id SERIAL PRIMARY KEY,
-            network VARCHAR(20) NOT NULL,
-            name VARCHAR(200),
-            symbol VARCHAR(50),
-            liquidity_usd DECIMAL,
-            token_address VARCHAR(255) UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    ''')
-    conn.commit()
-    print("✅ Таблица создана/проверена")
-except Exception as e:
-    print(f"❌ Ошибка создания таблицы: {e}")
-    cursor.close()
-    conn.close()
-    exit(1)
-
-# 4. Очищаем таблицу перед заполнением
-print("\n4️⃣ Очищаем таблицу...")
-try:
-    cursor.execute("DELETE FROM tokens")
-    conn.commit()
-    print("✅ Таблица очищена")
-except Exception as e:
-    print(f"❌ Ошибка очистки таблицы: {e}")
-    conn.rollback()
-
-# 5. Вставляем тестовые данные
-print("\n5️⃣ Вставляем тестовые данные...")
-test_tokens = [
-    ("BSC", "Wrapped BNB", "WBNB", 2500000000, "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"),
-    ("BSC", "Tether USD", "USDT", 1500000000, "0x55d398326f99059ff775485246999027b3197955"),
-    ("BSC", "USD Coin", "USDC", 1200000000, "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"),
-    ("BSC", "PancakeSwap", "CAKE", 800000000, "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82"),
-    ("BSC", "Dai Stablecoin", "DAI", 600000000, "0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3"),
-    ("BSC", "Polkadot", "DOT", 400000000, "0x7083609fce4d1d8dc0c979aab8c869ea2c873402"),
-    ("BSC", "Ethereum", "ETH", 350000000, "0x2170ed0880ac9a755fd29b2688956bd959f933f8"),
-    ("BSC", "Polygon", "MATIC", 300000000, "0xcc42724c6683b7e57334c4e856f4c9965ed682bd"),
-    ("BSC", "Cardano", "ADA", 180000000, "0x3ee2200efb3400fabb9aacf31297cbdd1d435d47"),
-    ("BSC", "Chainlink", "LINK", 120000000, "0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd"),
-]
-
-inserted_count = 0
-for token in test_tokens:
+def setup_database():
+    """Создаем таблицу в базе данных"""
     try:
-        cursor.execute('''
-            INSERT INTO tokens (network, name, symbol, liquidity_usd, token_address)
-            VALUES (%s, %s, %s, %s, %s)
-        ''', token)
-        inserted_count += 1
-    except Exception as e:
-        print(f"⚠️ Ошибка вставки {token[2]}: {e}")
-
-conn.commit()
-print(f"✅ Вставлено записей: {inserted_count}")
-
-# 6. Проверяем результат
-print("\n6️⃣ Проверяем результат...")
-try:
-    cursor.execute("SELECT COUNT(*) FROM tokens")
-    total_count = cursor.fetchone()[0]
-    print(f"✅ Всего записей в таблице: {total_count}")
-    
-    if total_count > 0:
-        print("\n📋 Первые 5 записей:")
-        cursor.execute("SELECT id, network, symbol, name, liquidity_usd FROM tokens ORDER BY id LIMIT 5")
-        for row in cursor.fetchall():
-            print(f"   {row[0]}. {row[1]}:{row[2]} - {row[3]} (${row[4]:,.0f})")
-    else:
-        print("❌ Таблица пустая!")
+        log("Подключаемся к базе данных...")
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
         
-except Exception as e:
-    print(f"❌ Ошибка проверки: {e}")
+        log("Проверяем подключение...")
+        cur.execute("SELECT version()")
+        db_version = cur.fetchone()[0]
+        log(f"✅ Подключено: {db_version.split(',')[0]}")
+        
+        log("Создаем таблицу 'tokens'...")
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS tokens (
+                id SERIAL PRIMARY KEY,
+                network VARCHAR(20) NOT NULL,
+                name VARCHAR(200),
+                symbol VARCHAR(50),
+                liquidity_usd DECIMAL,
+                token_address VARCHAR(255) UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        
+        log("Очищаем таблицу...")
+        cur.execute("TRUNCATE tokens RESTART IDENTITY")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        log("✅ Таблица создана и очищена")
+        return True
+        
+    except Exception as e:
+        log(f"❌ Ошибка базы данных: {e}")
+        return False
 
-# 7. Закрываем соединение
-print("\n7️⃣ Закрываем соединение...")
-cursor.close()
-conn.close()
-print("✅ Соединение закрыто")
+def get_birdeye_tokens():
+    """Получаем токены через BirdEye API"""
+    if not BIRDEYE_API_KEY:
+        log("❌ BIRDEYE_API_KEY не найден!")
+        log("   Добавьте переменную BIRDEYE_API_KEY в Railway Variables")
+        return []
+    
+    log(f"Используем BirdEye API Key: {BIRDEYE_API_KEY[:8]}...")
+    
+    url = "https://public-api.birdeye.so/defi/token_list"
+    headers = {"X-API-KEY": BIRDEYE_API_KEY}
+    
+    all_tokens = []
+    
+    # Получаем несколько страниц
+    for page in range(5):  # 5 страниц по 100 токенов = 500 токенов
+        params = {
+            "sort_by": "liquidity",
+            "sort_type": "desc",
+            "offset": page * 100,
+            "limit": 100,
+            "chain": "bsc"
+        }
+        
+        try:
+            log(f"Запрос страницы {page + 1}...")
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data.get("success"):
+                    tokens_data = data.get("data", {}).get("tokens", [])
+                    
+                    for token in tokens_data:
+                        address = token.get("address", "").lower()
+                        symbol = token.get("symbol", "UNKNOWN").upper()
+                        name = token.get("name", symbol)
+                        liquidity = float(token.get("liquidity", 0))
+                        
+                        if address and address.startswith("0x") and len(address) == 42:
+                            all_tokens.append({
+                                "token_address": address,
+                                "symbol": symbol[:50],
+                                "name": name[:200],
+                                "liquidity_usd": liquidity
+                            })
+                    
+                    log(f"   Получено: {len(tokens_data)} токенов")
+                    
+                    if len(tokens_data) < 100:
+                        log("   Достигнут конец списка")
+                        break
+                        
+                else:
+                    log(f"❌ Ошибка API: {data.get('message', 'Unknown error')}")
+                    break
+            else:
+                log(f"❌ HTTP ошибка: {response.status_code}")
+                break
+                
+        except Exception as e:
+            log(f"❌ Ошибка запроса: {e}")
+            break
+        
+        # Небольшая задержка между запросами
+        time.sleep(0.5)
+    
+    log(f"📊 Всего получено токенов: {len(all_tokens)}")
+    return all_tokens[:1000]  # Ограничиваем 1000 токенов
 
-print("\n" + "=" * 60)
-print("🎯 СКРИПТ ВЫПОЛНЕН УСПЕШНО!")
-print("=" * 60)
+def save_tokens(tokens):
+    """Сохраняем токены в базу данных"""
+    if not tokens:
+        log("❌ Нет токенов для сохранения")
+        return 0
+    
+    try:
+        log("Подключаемся к базе для сохранения...")
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        saved_count = 0
+        batch_size = 50
+        
+        # Сохраняем пачками
+        for i in range(0, len(tokens), batch_size):
+            batch = tokens[i:i + batch_size]
+            values = []
+            
+            for token in batch:
+                values.append((
+                    NETWORK,
+                    token['name'],
+                    token['symbol'],
+                    token['liquidity_usd'],
+                    token['token_address']
+                ))
+            
+            try:
+                cur.executemany('''
+                    INSERT INTO tokens (network, name, symbol, liquidity_usd, token_address)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (token_address) DO NOTHING
+                ''', values)
+                
+                saved_count += cur.rowcount
+                conn.commit()
+                
+                log(f"   Пакет {i//batch_size + 1}: {cur.rowcount} токенов")
+                
+            except Exception as e:
+                log(f"   ⚠️ Ошибка пакета: {e}")
+                conn.rollback()
+                continue
+        
+        # Итоговая проверка
+        cur.execute("SELECT COUNT(*) FROM tokens")
+        total_in_db = cur.fetchone()[0]
+        
+        cur.close()
+        conn.close()
+        
+        log(f"✅ Сохранено новых токенов: {saved_count}")
+        log(f"📊 Всего токенов в базе: {total_in_db}")
+        
+        return saved_count
+        
+    except Exception as e:
+        log(f"❌ Ошибка сохранения: {e}")
+        return 0
+
+def show_sample_data():
+    """Показываем пример данных из таблицы"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM tokens")
+        total = cur.fetchone()[0]
+        
+        log(f"\n📈 ИТОГОВАЯ СТАТИСТИКА:")
+        log(f"   Всего токенов в таблице: {total}")
+        
+        if total > 0:
+            log("\n🏆 ТОП-5 токенов по ликвидности:")
+            cur.execute("""
+                SELECT symbol, name, liquidity_usd, token_address 
+                FROM tokens 
+                ORDER BY liquidity_usd DESC 
+                LIMIT 5
+            """)
+            
+            for i, row in enumerate(cur.fetchall(), 1):
+                log(f"   {i}. {row[0]} ({row[1]})")
+                log(f"      Ликвидность: ${row[2]:,.0f}")
+                log(f"      Адрес: {row[3][:20]}...")
+        
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        log(f"❌ Ошибка при выводе данных: {e}")
+
+def main():
+    """Основная функция"""
+    print("\n" + "=" * 70)
+    log("🚀 ЗАПУСК BSC TOKEN COLLECTOR")
+    print("=" * 70)
+    
+    # Проверяем наличие необходимых переменных
+    if not DATABASE_URL:
+        log("❌ КРИТИЧЕСКАЯ ОШИБКА: DATABASE_URL не найден!")
+        log("   Убедитесь что переменная добавлена в Railway Variables")
+        return
+    
+    if not BIRDEYE_API_KEY:
+        log("❌ КРИТИЧЕСКАЯ ОШИБКА: BIRDEYE_API_KEY не найден!")
+        log("   Добавьте переменную BIRDEYE_API_KEY в Railway Variables")
+        log("   Значение: ваш API ключ от BirdEye")
+        return
+    
+    start_time = time.time()
+    
+    try:
+        # 1. Подготавливаем базу данных
+        if not setup_database():
+            return
+        
+        # 2. Получаем токены с BirdEye
+        log("\n" + "=" * 50)
+        log("🦅 ПОЛУЧЕНИЕ ДАННЫХ С BIRDЕYE")
+        print("=" * 50)
+        
+        tokens = get_birdeye_tokens()
+        
+        if not tokens:
+            log("❌ Не удалось получить токены")
+            log("   Возможные причины:")
+            log("   1. Неверный BIRDEYE_API_KEY")
+            log("   2. Лимит запросов исчерпан")
+            log("   3. Проблемы с сетью")
+            return
+        
+        # 3. Сохраняем токены в базу
+        log("\n" + "=" * 50)
+        log("💾 СОХРАНЕНИЕ В БАЗУ ДАННЫХ")
+        print("=" * 50)
+        
+        saved_count = save_tokens(tokens)
+        
+        if saved_count == 0:
+            log("⚠️  Токены не были сохранены")
+            log("   Возможно таблица уже содержит эти токены")
+        
+        # 4. Показываем результат
+        show_sample_data()
+        
+        total_time = time.time() - start_time
+        
+        log("\n" + "=" * 70)
+        if saved_count > 0:
+            log(f"✅ УСПЕХ! За {total_time:.1f} секунд сохранено {saved_count} токенов")
+        else:
+            log(f"⚠️  ВНИМАНИЕ: Токены не сохранены (возможно уже есть в базе)")
+        log("=" * 70)
+        
+    except Exception as e:
+        log(f"💥 НЕОБРАБОТАННАЯ ОШИБКА: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
