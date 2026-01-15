@@ -1,30 +1,116 @@
+# diagnostic.py - ПОЛНАЯ ДИАГНОСТИКА
 import os
-import time
-import requests
+import sys
 import psycopg2
-from psycopg2 import pool
+import requests
 
-# Railway автоматически загружает переменные
-COINGECKO_API_KEY = os.environ.get('COINGECKO_API_KEY')
+print("=" * 80)
+print("🔴 ЭКСТРЕННАЯ ДИАГНОСТИКА ПРОБЛЕМЫ")
+print("=" * 80)
+
+print("1️⃣ БАЗОВАЯ ИНФОРМАЦИЯ:")
+print(f"   Python: {sys.version}")
+print(f"   Рабочая директория: {os.getcwd()}")
+print(f"   Файлы в директории: {os.listdir('.')}")
+
+print("\n2️⃣ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ:")
+print("   Все переменные:")
+for key in sorted(os.environ.keys()):
+    value = os.environ[key]
+    # Показываем только важные или все
+    if any(x in key.lower() for x in ['db', 'pg', 'sql', 'api', 'key', 'url', 'pass']):
+        masked = value[:30] + '...' if len(value) > 30 else value
+        print(f"   {key:25} = {masked}")
+
+print("\n3️⃣ КРИТИЧЕСКИЕ ПЕРЕМЕННЫЕ:")
 DATABASE_URL = os.environ.get('DATABASE_URL')
-NETWORK = "BSC"
+COINGECKO_API_KEY = os.environ.get('COINGECKO_API_KEY')
 
-db_pool = None
+print(f"   DATABASE_URL: {'✅ НАЙДЕН' if DATABASE_URL else '❌ НЕ НАЙДЕН'}")
+if DATABASE_URL:
+    print(f"      Пример: {DATABASE_URL[:50]}...")
 
-def init_database():
-    """Создаем таблицу с 6 столбцами"""
-    global db_pool
+print(f"   COINGECKO_API_KEY: {'✅ НАЙДЕН' if COINGECKO_API_KEY else '❌ НЕ НАЙДЕН'}")
+if COINGECKO_API_KEY:
+    print(f"      Длина: {len(COINGECKO_API_KEY)} символов")
+
+print("\n4️⃣ ПРОВЕРКА ПОДКЛЮЧЕНИЯ К БАЗЕ:")
+if DATABASE_URL:
     try:
-        db_pool = psycopg2.pool.SimpleConnectionPool(1, 20, DATABASE_URL)
-        print("✅ Database connection pool created")
+        print(f"   Пробуем подключиться к: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL[:50]}...")
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        cur = conn.cursor()
         
-        conn = db_pool.getconn()
-        cursor = conn.cursor()
+        # Простой запрос
+        cur.execute("SELECT version()")
+        version = cur.fetchone()[0]
+        print(f"   ✅ PostgreSQL подключен: {version.split(',')[0]}")
         
-        # Удаляем старую таблицу и создаем новую с 6 столбцами
-        cursor.execute('DROP TABLE IF EXISTS tokens;')
+        # Проверяем таблицу tokens
+        cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tokens')")
+        exists = cur.fetchone()[0]
+        print(f"   📊 Таблица 'tokens': {'✅ СУЩЕСТВУЕТ' if exists else '❌ НЕ СУЩЕСТВУЕТ'}")
         
-        cursor.execute('''
+        if exists:
+            cur.execute("SELECT COUNT(*) FROM tokens")
+            count = cur.fetchone()[0]
+            print(f"   📊 Записей в таблице: {count}")
+            
+            # Структура таблицы
+            cur.execute("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'tokens' 
+                ORDER BY ordinal_position
+            """)
+            columns = cur.fetchall()
+            print(f"   📋 Столбцы ({len(columns)}):")
+            for name, dtype in columns:
+                print(f"      - {name} ({dtype})")
+        
+        cur.close()
+        conn.close()
+        print("   ✅ Подключение к базе - УСПЕХ")
+        
+    except psycopg2.OperationalError as e:
+        print(f"   ❌ ОШИБКА ПОДКЛЮЧЕНИЯ: {e}")
+        print(f"   Проблема с DATABASE_URL: {DATABASE_URL[:100]}")
+    except Exception as e:
+        print(f"   ❌ ДРУГАЯ ОШИБКА: {type(e).__name__}: {e}")
+else:
+    print("   ⚠️ Пропускаем - нет DATABASE_URL")
+
+print("\n5️⃣ ПРОВЕРКА COINGECKO API:")
+if COINGECKO_API_KEY:
+    try:
+        print("   Тестируем подключение к CoinGecko...")
+        response = requests.get("https://api.coingecko.com/api/v3/ping", timeout=10)
+        print(f"   📡 Статус подключения: {response.status_code} ({'✅ OK' if response.status_code == 200 else '❌ ERROR'})")
+        
+        if response.status_code == 200:
+            # Тестируем ключ
+            test_url = "https://api.coingecko.com/api/v3/coins/bitcoin"
+            test_response = requests.get(test_url, params={'x_cg_demo_api_key': COINGECKO_API_KEY}, timeout=10)
+            print(f"   🔑 API Key статус: {test_response.status_code} ({'✅ РАБОТАЕТ' if test_response.status_code == 200 else '❌ НЕ РАБОТАЕТ'})")
+            
+            if test_response.status_code != 200:
+                print(f"   ❗ Ответ от CoinGecko: {test_response.text[:200]}")
+    except Exception as e:
+        print(f"   ❌ Ошибка проверки API: {type(e).__name__}: {e}")
+else:
+    print("   ⚠️ Пропускаем - нет COINGECKO_API_KEY")
+
+print("\n6️⃣ ПРОБНЫЙ ТЕСТ - СОЗДАЕМ ТАБЛИЦУ:")
+if DATABASE_URL:
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        print("   Шаг 1: Удаляем старую таблицу...")
+        cur.execute('DROP TABLE IF EXISTS tokens;')
+        
+        print("   Шаг 2: Создаем новую таблицу...")
+        cur.execute('''
             CREATE TABLE tokens (
                 id SERIAL PRIMARY KEY,
                 network VARCHAR(20) NOT NULL,
@@ -36,293 +122,58 @@ def init_database():
             )
         ''')
         
+        print("   Шаг 3: Добавляем тестовую запись...")
+        cur.execute('''
+            INSERT INTO tokens (network, name, symbol, liquidity_usd, token_address)
+            VALUES (%s, %s, %s, %s, %s)
+        ''', ('BSC', 'Wrapped BNB', 'WBNB', 2500000.50, '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c'))
+        
         conn.commit()
-        cursor.close()
-        db_pool.putconn(conn)
         
-        print("✅ Table 'tokens' created with 6 columns")
-        print("   - id (SERIAL PRIMARY KEY)")
-        print("   - network (VARCHAR)")
-        print("   - name (VARCHAR)")
-        print("   - symbol (VARCHAR)")
-        print("   - liquidity_usd (DECIMAL)")
-        print("   - token_address (VARCHAR, UNIQUE)")
-        print("   - created_at (TIMESTAMP, DEFAULT NOW())")
+        print("   Шаг 4: Проверяем...")
+        cur.execute("SELECT COUNT(*) FROM tokens")
+        count = cur.fetchone()[0]
         
-        return True
+        if count > 0:
+            print(f"   ✅ ТЕСТ ПРОЙДЕН! В таблице {count} записей")
+            cur.execute("SELECT id, network, symbol, name FROM tokens")
+            for row in cur.fetchall():
+                print(f"      📍 {row}")
+        else:
+            print("   ❌ ТЕСТ ПРОВАЛЕН - таблица пустая")
         
-    except Exception as e:
-        print(f"❌ Database initialization error: {e}")
-        return False
-
-def get_tokens_with_contract_addresses(limit=30):
-    """Получаем 30 BSC токенов с адресами"""
-    if not COINGECKO_API_KEY:
-        print("❌ COINGECKO_API_KEY not set!")
-        return []
-    
-    print(f"🔄 Getting top {limit} BSC tokens with contract addresses...")
-    
-    try:
-        url = "https://api.coingecko.com/api/v3/coins/markets"
-        params = {
-            'vs_currency': 'usd',
-            'category': 'binance-smart-chain',
-            'order': 'volume_desc',
-            'per_page': limit,
-            'page': 1,
-            'sparkline': 'false',
-            'x_cg_demo_api_key': COINGECKO_API_KEY
-        }
-        
-        print("📥 Requesting tokens list from CoinGecko...")
-        response = requests.get(url, params=params, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"❌ CoinGecko API error: {response.status_code}")
-            return []
-        
-        tokens = response.json()
-        print(f"✅ Received {len(tokens)} tokens")
+        cur.close()
+        conn.close()
         
     except Exception as e:
-        print(f"❌ Error getting tokens list: {e}")
-        return []
-    
-    tokens_with_addresses = []
-    
-    print(f"🔍 Getting contract addresses for {len(tokens)} tokens...")
-    
-    for i, token in enumerate(tokens):
-        try:
-            token_id = token.get('id')
-            symbol = token.get('symbol', 'UNKNOWN').upper()
-            
-            if not token_id:
-                continue
-            
-            if i % 5 == 0:
-                print(f"  Processing {i+1}/{len(tokens)}...")
-            
-            details_url = f"https://api.coingecko.com/api/v3/coins/{token_id}"
-            details_params = {
-                'localization': 'false',
-                'tickers': 'false',
-                'market_data': 'false',
-                'community_data': 'false',
-                'developer_data': 'false',
-                'sparkline': 'false',
-                'x_cg_demo_api_key': COINGECKO_API_KEY
-            }
-            
-            details_response = requests.get(details_url, params=details_params, timeout=20)
-            
-            if details_response.status_code == 200:
-                details = details_response.json()
-                platforms = details.get('platforms', {})
-                
-                contract_address = None
-                bsc_keys = ['binance-smart-chain', 'bsc', 'binance']
-                for key in bsc_keys:
-                    if key in platforms and platforms[key]:
-                        contract_address = platforms[key]
-                        break
-                
-                if contract_address and isinstance(contract_address, str) and contract_address.startswith('0x'):
-                    contract_address = contract_address.lower().strip()
-                    
-                    token['contract_address'] = contract_address
-                    token['coin_id'] = token_id
-                    
-                    tokens_with_addresses.append(token)
-                    print(f"    ✓ {symbol}: found BSC address")
-                else:
-                    for key, address in platforms.items():
-                        if address and isinstance(address, str) and address.startswith('0x'):
-                            token['contract_address'] = address.lower().strip()
-                            token['coin_id'] = token_id
-                            tokens_with_addresses.append(token)
-                            print(f"    ⚠️ {symbol}: using {key} address")
-                            break
-                    else:
-                        print(f"    ✗ {symbol}: no valid contract address found")
-            
-            time.sleep(0.5)
-            
-        except requests.exceptions.Timeout:
-            print(f"    ⏱️ Timeout for {token.get('symbol', 'UNKNOWN')}, skipping...")
-        except Exception as e:
-            print(f"    ⚠️ Error processing {token.get('symbol', 'UNKNOWN')}: {e}")
-    
-    print(f"✅ Found {len(tokens_with_addresses)} tokens with valid contract addresses")
-    return tokens_with_addresses
-
-def save_tokens_to_database(tokens_data):
-    """Сохраняем токены в 6 столбцов таблицы"""
-    if not db_pool or not tokens_data:
-        print("⚠️ No tokens to save or no database connection")
-        return 0
-    
-    saved_count = 0
-    error_count = 0
-    
-    print(f"💾 Saving {len(tokens_data)} tokens to 6-column table...")
-    
-    for i, token in enumerate(tokens_data):
-        try:
-            # Извлекаем данные для 6 столбцов
-            token_address = token.get('contract_address', '').strip()
-            symbol = token.get('symbol', 'UNKNOWN').upper()
-            name = token.get('name', '')
-            
-            if not token_address or not token_address.startswith('0x'):
-                error_count += 1
-                continue
-            
-            # Вычисляем ликвидность для столбца liquidity_usd
-            volume = token.get('total_volume', 0) or 0
-            price = token.get('current_price', 0) or 0
-            liquidity_usd = float(volume) * float(price)
-            
-            conn = db_pool.getconn()
-            cursor = conn.cursor()
-            
-            try:
-                # ВСТАВЛЯЕМ В 6 СТОЛБЦОВ
-                cursor.execute('''
-                    INSERT INTO tokens 
-                    (network, name, symbol, liquidity_usd, token_address)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (token_address) DO NOTHING
-                ''', (
-                    NETWORK,           # network - столбец 2
-                    name[:200],        # name - столбец 3
-                    symbol[:50],       # symbol - столбец 4
-                    liquidity_usd,     # liquidity_usd - столбец 5
-                    token_address      # token_address - столбец 6
-                    # created_at - столбец 7 добавится автоматически
-                ))
-                
-                if cursor.rowcount > 0:
-                    saved_count += 1
-                
-                conn.commit()
-                
-                if saved_count % 5 == 0:
-                    print(f"  ✅ Saved {saved_count} tokens so far...")
-                
-            except Exception as e:
-                conn.rollback()
-                error_count += 1
-            finally:
-                cursor.close()
-                db_pool.putconn(conn)
-                
-        except Exception as e:
-            error_count += 1
-    
-    print(f"📊 Save completed: {saved_count} saved, {error_count} failed")
-    return saved_count
-
-def display_results(tokens_saved, total_tokens):
-    """Показываем результаты"""
-    print("\n" + "=" * 60)
-    print("🎯 COLLECTION COMPLETE")
-    print("=" * 60)
-    
-    print(f"📈 Results:")
-    print(f"   • Tokens processed: {total_tokens}")
-    print(f"   • Successfully saved: {tokens_saved}")
-    
-    if tokens_saved > 0:
-        print(f"\n✅ SUCCESS! Table 'tokens' now has {tokens_saved} BSC tokens")
-        
-        try:
-            conn = db_pool.getconn()
-            cursor = conn.cursor()
-            
-            # Проверяем структуру таблицы
-            cursor.execute('''
-                SELECT column_name, data_type 
-                FROM information_schema.columns 
-                WHERE table_name = 'tokens' 
-                ORDER BY ordinal_position
-            ''')
-            
-            print("\n📊 Table structure (should have 7 columns):")
-            columns = cursor.fetchall()
-            for col_name, data_type in columns:
-                print(f"   - {col_name} ({data_type})")
-            
-            # Показываем топ токенов
-            cursor.execute('''
-                SELECT symbol, name, liquidity_usd 
-                FROM tokens 
-                ORDER BY liquidity_usd DESC 
-                LIMIT 5
-            ''')
-            
-            print("\n🏆 Top 5 tokens by liquidity:")
-            for i, (symbol, name, liquidity) in enumerate(cursor.fetchall(), 1):
-                print(f"  {i}. {symbol:6} - {name[:20]:20} ${liquidity:12,.0f}")
-            
-            cursor.close()
-            db_pool.putconn(conn)
-            
-        except Exception as e:
-            print(f"  ⚠️ Could not fetch data: {e}")
-        
-        print("\n📋 To verify in PostgreSQL:")
-        print("   SELECT COUNT(*) FROM tokens;")
-        print("   SELECT * FROM tokens LIMIT 5;")
-    else:
-        print("\n❌ No tokens were saved")
-    
-    print("\n" + "=" * 60)
-
-def main():
-    """Основная функция"""
-    print("=" * 60)
-    print("🚀 BSC Token Collector - 30 tokens, 6 columns")
-    print("=" * 60)
-    
-    if not COINGECKO_API_KEY:
-        print("❌ ERROR: COINGECKO_API_KEY not found!")
-        return
-    
-    if not DATABASE_URL:
-        print("❌ ERROR: DATABASE_URL not found!")
-        return
-    
-    print("\n🔧 Initializing database...")
-    if not init_database():
-        return
-    
-    print("\n🌐 Fetching 30 BSC tokens...")
-    tokens = get_tokens_with_contract_addresses(limit=30)
-    
-    if not tokens:
-        print("❌ No tokens retrieved")
-        return
-    
-    print(f"\n💾 Saving to database...")
-    saved_count = save_tokens_to_database(tokens)
-    
-    display_results(saved_count, len(tokens))
-    
-    print(f"\n⏱️ Execution time: {time.time() - start_time:.1f} seconds")
-
-if __name__ == "__main__":
-    print("🔄 Starting script...")
-    start_time = time.time()
-    
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n🛑 Interrupted")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"   ❌ ОШИБКА ТЕСТА: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-    
-    print("\n✅ Script finished")
+else:
+    print("   ⚠️ Пропускаем - нет DATABASE_URL")
+
+print("\n" + "=" * 80)
+print("📊 ИТОГИ ДИАГНОСТИКИ:")
+print("=" * 80)
+
+if not DATABASE_URL:
+    print("❌ ПРОБЛЕМА: DATABASE_URL не найден")
+    print("   Решение: Добавьте в Railway Variables")
+
+if not COINGECKO_API_KEY:
+    print("❌ ПРОБЛЕМА: COINGECKO_API_KEY не найден")
+    print("   Решение: Добавьте ваш ключ CoinGecko")
+
+if DATABASE_URL and COINGECKO_API_KEY:
+    print("✅ Все переменные найдены")
+    print("   Проблема в коде или подключении")
+
+print("\n🔧 Рекомендации:")
+print("1. Проверьте Railway Logs для детальных ошибок")
+print("2. Убедитесь что DATABASE_URL начинается с 'postgresql://'")
+print("3. Проверьте что COINGECKO_API_KEY активен")
+print("4. Перезапустите deployment в Railway")
+
+print("=" * 80)
+print("🏁 ДИАГНОСТИКА ЗАВЕРШЕНА")
+print("=" * 80)
