@@ -19,7 +19,7 @@ db_pool = None
 # ========== ОСНОВНЫЕ ФУНКЦИИ ==========
 
 def init_database():
-    """Инициализация соединения с БД и создание таблицы с правильными столбцами"""
+    """Инициализация соединения с БД и проверка структуры таблицы"""
     global db_pool
     try:
         db_pool = psycopg2.pool.SimpleConnectionPool(1, 20, DATABASE_URL)
@@ -28,42 +28,47 @@ def init_database():
         conn = db_pool.getconn()
         cursor = conn.cursor()
         
-        # УДАЛЯЕМ старую таблицу и создаем новую с правильными столбцами
-        cursor.execute('DROP TABLE IF EXISTS tokens;')
-        
-        # СОЗДАЕМ таблицу ТОЛЬКО с нужными столбцами
+        # Проверяем наличие всех необходимых столбцов
         cursor.execute('''
-            CREATE TABLE tokens (
-                id SERIAL PRIMARY KEY,
-                network VARCHAR(20) NOT NULL,
-                name VARCHAR(200),
-                symbol VARCHAR(50),
-                liquidity_usd DECIMAL,
-                token_address VARCHAR(255) UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_name = 'tokens' 
+            ORDER BY ordinal_position
         ''')
         
-        conn.commit()
+        columns = {row[0]: row[1] for row in cursor.fetchall()}
+        print(f"📊 Table 'tokens' has {len(columns)} columns")
+        
+        # Проверяем обязательные столбцы
+        required_columns = ['network', 'name', 'symbol', 'liquidity_usd', 
+                          'token_address', 'current_price', 'market_cap', 'total_volume']
+        
+        missing_columns = [col for col in required_columns if col not in columns]
+        
+        if missing_columns:
+            print(f"❌ Missing columns: {missing_columns}")
+            return False
+        
+        # Проверяем наличие coin_id, добавляем если нет
+        if 'coin_id' not in columns:
+            print("⚠️ Column 'coin_id' not found, adding it...")
+            try:
+                cursor.execute('ALTER TABLE tokens ADD COLUMN coin_id VARCHAR(100);')
+                conn.commit()
+                print("✅ Column 'coin_id' added")
+            except Exception as e:
+                print(f"⚠️ Could not add coin_id: {e}")
+        
         cursor.close()
         db_pool.putconn(conn)
-        
-        print("✅ Table 'tokens' created with correct columns:")
-        print("   - id (PRIMARY KEY)")
-        print("   - network (сеть)")
-        print("   - name (название токена)")
-        print("   - symbol (символ)")
-        print("   - liquidity_usd (ликвидность в USD)")
-        print("   - token_address (адрес токена, UNIQUE)")
-        print("   - created_at (дата создания)")
-        
+        print("✅ Database is ready")
         return True
         
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
         return False
 
-def get_tokens_with_contract_addresses(limit=100):  # ИЗМЕНИЛОСЬ: было 30, стало 100
+def get_tokens_with_contract_addresses(limit=30):
     """
     Получает список токенов BSC с реальными адресами контрактов через CoinGecko API.
     Возвращает только токены с валидными BSC-адресами.
@@ -81,7 +86,7 @@ def get_tokens_with_contract_addresses(limit=100):  # ИЗМЕНИЛОСЬ: бы
             'vs_currency': 'usd',
             'category': 'binance-smart-chain',
             'order': 'volume_desc',  # Сортировка по объёму (ликвидности)
-            'per_page': limit,  # ИЗМЕНИЛОСЬ: было 30, стало 100
+            'per_page': limit,
             'page': 1,
             'sparkline': 'false',
             'x_cg_demo_api_key': COINGECKO_API_KEY
@@ -114,8 +119,8 @@ def get_tokens_with_contract_addresses(limit=100):  # ИЗМЕНИЛОСЬ: бы
             if not token_id:
                 continue
             
-            # Выводим прогресс каждые 10 токенов (было 5)
-            if i % 10 == 0:
+            # Выводим прогресс каждые 5 токенов
+            if i % 5 == 0:
                 print(f"  Processing {i+1}/{len(tokens)}...")
             
             # Получаем детали токена для адреса контракта
@@ -169,8 +174,8 @@ def get_tokens_with_contract_addresses(limit=100):  # ИЗМЕНИЛОСЬ: бы
                     else:
                         print(f"    ✗ {symbol}: no valid contract address found")
             
-            # Пауза между запросами чтобы не превысить лимиты API (уменьшил паузу)
-            time.sleep(0.3)  # Было 0.5
+            # Пауза между запросами чтобы не превысить лимиты API
+            time.sleep(0.5)
             
         except requests.exceptions.Timeout:
             print(f"    ⏱️ Timeout for {token.get('symbol', 'UNKNOWN')}, skipping...")
@@ -183,7 +188,7 @@ def get_tokens_with_contract_addresses(limit=100):  # ИЗМЕНИЛОСЬ: бы
 def save_tokens_to_database(tokens_data):
     """
     Сохраняет токены в базу данных.
-    ИСПРАВЛЕНО: Сохраняем ТОЛЬКО нужные столбцы
+    Каждый токен сохраняется отдельной транзакцией для надёжности.
     """
     if not db_pool or not tokens_data:
         print("⚠️ No tokens to save or no database connection")
@@ -198,6 +203,7 @@ def save_tokens_to_database(tokens_data):
         try:
             # Извлекаем данные
             token_address = token.get('contract_address', '').strip()
+            coin_id = token.get('coin_id', '')
             symbol = token.get('symbol', 'UNKNOWN').upper()
             name = token.get('name', '')
             
@@ -207,38 +213,51 @@ def save_tokens_to_database(tokens_data):
                 error_count += 1
                 continue
             
-            # Вычисляем ликвидность (total_volume как в вашем рабочем коде)
+            # Подготавливаем значения для базы данных
             liquidity_usd = float(token.get('total_volume', 0) or 0)
+            current_price = float(token.get('current_price', 0) or 0)
+            market_cap = float(token.get('market_cap', 0) or 0)
+            total_volume = liquidity_usd  # Используем тот же показатель
             
             # Получаем соединение с БД
             conn = db_pool.getconn()
             cursor = conn.cursor()
             
             try:
-                # SQL запрос для вставки ТОЛЬКО с нужными столбцами
+                # SQL запрос для вставки или обновления
+                # Используем все столбцы, которые есть в вашей таблице
                 cursor.execute('''
                     INSERT INTO tokens 
-                    (network, name, symbol, liquidity_usd, token_address)
-                    VALUES (%s, %s, %s, %s, %s)
+                    (network, name, symbol, liquidity_usd, token_address, 
+                     current_price, market_cap, total_volume, coin_id, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (token_address) 
                     DO UPDATE SET
                         name = EXCLUDED.name,
                         symbol = EXCLUDED.symbol,
                         liquidity_usd = EXCLUDED.liquidity_usd,
-                        created_at = NOW()
+                        current_price = EXCLUDED.current_price,
+                        market_cap = EXCLUDED.market_cap,
+                        total_volume = EXCLUDED.total_volume,
+                        coin_id = EXCLUDED.coin_id,
+                        updated_at = NOW()
                 ''', (
                     NETWORK,
                     name[:200],  # Ограничиваем длину
                     symbol[:50],
                     liquidity_usd,
-                    token_address
+                    token_address,
+                    current_price,
+                    market_cap,
+                    total_volume,
+                    coin_id[:100]
                 ))
                 
                 conn.commit()
                 saved_count += 1
                 
                 # Выводим прогресс
-                if saved_count % 10 == 0:  # Было 5
+                if saved_count % 5 == 0:
                     print(f"  ✅ Saved {saved_count} tokens so far...")
                 
             except psycopg2.Error as db_error:
@@ -312,7 +331,6 @@ def main():
     """Основной рабочий процесс"""
     print("=" * 60)
     print("🚀 BSC Token Collector - CoinGecko + PostgreSQL")
-    print(f"🎯 Target: 100 BSC tokens with contract addresses")  # ИЗМЕНИЛОСЬ
     print("=" * 60)
     
     # Проверка обязательных переменных
@@ -335,7 +353,7 @@ def main():
     
     # Получение токенов с адресами контрактов
     print("\n🌐 Fetching BSC tokens from CoinGecko...")
-    tokens = get_tokens_with_contract_addresses(limit=100)  # ИЗМЕНИЛОСЬ: было 30, стало 100
+    tokens = get_tokens_with_contract_addresses(limit=30)
     
     if not tokens:
         print("❌ No tokens retrieved from CoinGecko")
@@ -371,5 +389,5 @@ if __name__ == "__main__":
     print("=" * 60)
     
     # Держим контейнер активным для проверки логов
-    print("\n⏳ Container will exit in 10 seconds...")
-    time.sleep(10)
+    print("\n⏳ Container will exit in 30 seconds...")
+    time.sleep(30)
